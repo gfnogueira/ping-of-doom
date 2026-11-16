@@ -1,0 +1,29 @@
+services:
+  server:
+    build: .
+    image: ping-of-doom
+    command: ["python", "-m", "pod.server", "/wad/doom1.wad"]
+    cap_add: [NET_RAW]
+    sysctls:
+      net.ipv4.icmp_echo_ignore_all: 1
+    volumes:
+      - ./wad:/wad:ro
+
+  # Shares the server's network namespace so it sees every ICMP packet.
+  sniffer:
+    image: ping-of-doom
+    network_mode: "service:server"
+    cap_add: [NET_RAW, NET_ADMIN]
+    command: ["tcpdump", "-i", "eth0", "-U", "-n", "-w", "/out/capture.pcap", "icmp"]
+    volumes:
+      - ./out:/out
+    depends_on: [server]
+
+  client:
+    image: ping-of-doom
+    profiles: ["client"]
+    command: ["python", "-m", "pod.client", "server", "--out", "/out/doom1.wad"]
+    cap_add: [NET_RAW]
+    volumes:
+      - ./out:/out
+    depends_on: [server]
