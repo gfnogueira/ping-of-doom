@@ -1,0 +1,12 @@
+# Behaviour rules for ICMP echo tunnelling. Tune the sizes and rates to your network.
+# Suricata cannot compare a reply with its request or measure entropy, so
+# pod/detect.py covers those two checks.
+
+alert icmp any any -> any any (msg:"POD large ICMP echo request"; itype:8; dsize:>100; classtype:bad-unknown; sid:4100001; rev:1;)
+
+alert icmp any any -> any any (msg:"POD large ICMP echo reply"; itype:0; dsize:>100; classtype:bad-unknown; sid:4100002; rev:1;)
+
+alert icmp any any -> any any (msg:"POD echo request burst"; itype:8; threshold:type both, track by_src, count 100, seconds 1; classtype:bad-unknown; sid:4100003; rev:1;)
+
+# Matches this project's own marker only. Anyone can change it, so do not rely on it.
+alert icmp any any -> any any (msg:"POD ping-of-doom marker"; itype:0; content:"POD1"; offset:0; depth:4; classtype:trojan-activity; sid:4100004; rev:1;)
