@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -v
+
+  end-to-end:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the lab
+        run: PLAY=0 ./demo.sh
+      - name: WAD arrived intact
+        run: echo "f0cefca49926d00903cf57551d901abe  out/doom1.wad" | md5sum -c -
+      - name: Detector flags the capture
+        run: |
+          set +e
+          python3 -m pod.detect out/capture.pcap
+          test $? -eq 1
