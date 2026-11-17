@@ -35,6 +35,10 @@ containers, pulls the game over ICMP, runs the detector and opens Doom if
 
 ## How it works
 
+The game lives on the server, as a plain file. ICMP is only the road it travels on.
+That is the difference from doom-over-dns, where the game is stored in public DNS
+records. Here nothing is stored in a third party service.
+
 ```mermaid
 sequenceDiagram
     participant C as Client
@@ -143,6 +147,23 @@ and this project's marker. I ran them with Suricata 8.0.8 against the demo captu
 and they fire. Suricata cannot compare a reply with its request or measure entropy,
 so those two checks only exist in the Python detector.
 </details>
+
+## MITRE ATT&CK mapping
+
+This is a lab demo, not an exploit. No vulnerability is involved and there is no CVE.
+ICMP echo works as designed. What it shows is a technique attackers use, mapped to
+the [ATT&CK](https://attack.mitre.org/) matrix so you can find it in your own
+detection coverage.
+
+| Technique | ID | How it shows up here |
+| --- | --- | --- |
+| [Protocol Tunneling](https://attack.mitre.org/techniques/T1572/) | T1572 | One protocol (a file transfer) carried inside another (ICMP echo) |
+| [Non-Application Layer Protocol](https://attack.mitre.org/techniques/T1095/) | T1095 | Data moves over ICMP, with no HTTP, DNS or other application protocol |
+| [Ingress Tool Transfer](https://attack.mitre.org/techniques/T1105/) | T1105 | The client pulls a file into the host, which is what the demo does |
+| [Exfiltration Over Alternative Protocol](https://attack.mitre.org/techniques/T1048/) | T1048 | The same channel works the other way for data leaving a network |
+
+The detector looks at the network traffic itself, which maps to the ATT&CK data
+source Network Traffic Content and Network Traffic Flow.
 
 ## Honest limits
 
