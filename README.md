@@ -33,11 +33,26 @@ It downloads the shareware WAD, runs a server, a sniffer and a client in
 containers, pulls the game over ICMP, runs the detector and opens Doom if
 `chocolate-doom` is installed.
 
+## Why this matters
+
+Many networks block most outbound traffic but still allow ping, because admins need
+it for diagnostics. If an attacker already controls one machine inside, that open
+door can become a way to move data.
+
+| An attacker wants to | What usually stops them | Why ping can slip through |
+| --- | --- | --- |
+| Bring a tool in | Proxy, download filters | Pings are rarely inspected past their type |
+| Take data out | Upload limits, DLP | The echo payload takes any bytes |
+| Keep a command channel | Proxy logs, odd connections | Request and reply pairs look like normal ping |
+
+This repo only covers the transport, with Doom as the file. It is a lab for seeing
+the traffic and detecting it, not an attack tool.
+
 ## How it works
 
 The game lives on the server, as a plain file. ICMP is only the road it travels on.
 That is the difference from doom-over-dns, where the game is stored in public DNS
-records. Here nothing is stored in a third party service.
+records.
 
 ```mermaid
 sequenceDiagram
@@ -52,6 +67,11 @@ sequenceDiagram
     Note over C: verify sha256, write doom1.wad
 ```
 
+Small request, big reply. That mismatch is what the detector looks for.
+
+<details>
+<summary>Protocol details</summary>
+
 | Detail | Value |
 | --- | --- |
 | Compression | gzip, level 9 |
@@ -60,9 +80,7 @@ sequenceDiagram
 | Request payload | 8 bytes: marker + chunk index |
 | Reply payload | marker + index + up to 1400 bytes of data |
 | Reliability | window of 32, resend on timeout, sha256 at the end |
-
-ICMP payloads can carry any bytes, which is why tools like ptunnel exist. Nothing
-here is new. The point is to see it end to end and learn what it looks like on the wire.
+</details>
 
 <details>
 <summary>Run it step by step, and why it uses containers</summary>
@@ -90,25 +108,22 @@ Same detector, two captures:
 | `ping -c 5 1.1.1.1` and `ping -s 1000 -c 3 1.1.1.1` from a laptop | 16 | ok |
 | Doom over ICMP | 2502 | suspicious |
 
-### What it checks
-
 | Check | Catches | Weight |
 | --- | --- | --- |
-| `reply_mismatch` | Reply is not a copy of the request. A real ping always echoes the payload, a tunnel has to put new data in there | Strong |
+| `reply_mismatch` | Reply is not a copy of the request. A real ping always echoes the payload back | Strong |
 | `high_entropy` | Payloads that look compressed or encrypted | Medium |
 | `high_rate` | Too many echo requests per second to one host | Medium |
 | `big_payload` | Echo payloads larger than a normal ping | Weak, a lead only |
 
-| Verdict | When |
-| --- | --- |
-| `ok` | Nothing fired |
-| `notice` | One check fired, and it was not `reply_mismatch` |
-| `suspicious` | `reply_mismatch`, or two or more checks |
+Verdicts: `ok` when nothing fires, `notice` when one weak check fires,
+`suspicious` on `reply_mismatch` or two or more checks. It reads pcap and pcapng and
+exits with code 1 on `suspicious`, so it fits in a script or a CI job.
 
 The detector ignores this project's `POD1` marker on purpose. Anyone can change a
 marker in a minute.
 
-### Options
+<details>
+<summary>Options</summary>
 
 | Flag | Default | What it does |
 | --- | --- | --- |
@@ -117,9 +132,7 @@ marker in a minute.
 | `--min-entropy` | 7.0 | Bits per byte that count as high |
 | `--min-hits` | 10 | Packets needed before size, entropy or mismatch fires |
 | `--json` | off | Machine readable output |
-
-It reads pcap and pcapng, and exits with code 1 when something is suspicious, so
-it fits in a script or a CI job.
+</details>
 
 <details>
 <summary>Run it on your own traffic</summary>
@@ -142,28 +155,50 @@ python3 -m pod.detect /tmp/icmp.pcap
 <details>
 <summary>Suricata rules</summary>
 
-`rules/suricata.rules` has four rules: large request, large reply, request burst
-and this project's marker. I ran them with Suricata 8.0.8 against the demo capture
-and they fire. Suricata cannot compare a reply with its request or measure entropy,
-so those two checks only exist in the Python detector.
+Four rules in `rules/suricata.rules`, checked with Suricata 8.0.8 against the demo
+capture.
+
+| SID | Matches | On the demo capture |
+| --- | --- | --- |
+| 4100001 | Echo request with a payload over 100 bytes | Silent, the demo requests are 8 bytes |
+| 4100002 | Echo reply with a payload over 100 bytes | Fires on 1251 replies |
+| 4100003 | More than 100 echo requests per second from one source | Fires once |
+| 4100004 | This project's `POD1` marker | Fires, but anyone can change a marker |
+
+Suricata cannot compare a reply with its request or measure entropy. Those two
+checks only exist in the Python detector.
 </details>
+
+## Defenses, cheapest first
+
+You do not need a detector if the tunnel never leaves. Start at the top.
+
+| # | Measure | Why it helps |
+| --- | --- | --- |
+| 1 | Block outbound echo to the internet, or allow it only to hosts you need | No door, no tunnel |
+| 2 | Cap the echo payload size at the firewall. Normal ping is 56 bytes on Linux and macOS, 32 on Windows | A tunnel needs room to carry data |
+| 3 | Rate limit echo per source | A file transfer is a burst, a ping is not |
+| 4 | Watch ICMP in your IDS or NDR (Suricata, Zeek, a commercial tool) | Catches what the firewall allows |
+| 5 | Compare each reply with its request | A real echo reply is a copy. This repo's detector does it |
+
+Keep the ICMP types your network needs, like destination unreachable, so path MTU
+discovery keeps working. Blocking all ICMP breaks real things.
+
+To see which layer catches this in your setup, run the lab in an environment you are
+authorized to test.
 
 ## MITRE ATT&CK mapping
 
-This is a lab demo, not an exploit. No vulnerability is involved and there is no CVE.
-ICMP echo works as designed. What it shows is a technique attackers use, mapped to
-the [ATT&CK](https://attack.mitre.org/) matrix so you can find it in your own
-detection coverage.
+No vulnerability is involved and there is no CVE. ICMP echo works as designed. What
+this shows is a technique attackers use, mapped to
+[ATT&CK](https://attack.mitre.org/) so you can find it in your own coverage.
 
 | Technique | ID | How it shows up here |
 | --- | --- | --- |
-| [Protocol Tunneling](https://attack.mitre.org/techniques/T1572/) | T1572 | One protocol (a file transfer) carried inside another (ICMP echo) |
-| [Non-Application Layer Protocol](https://attack.mitre.org/techniques/T1095/) | T1095 | Data moves over ICMP, with no HTTP, DNS or other application protocol |
-| [Ingress Tool Transfer](https://attack.mitre.org/techniques/T1105/) | T1105 | The client pulls a file into the host, which is what the demo does |
-| [Exfiltration Over Alternative Protocol](https://attack.mitre.org/techniques/T1048/) | T1048 | The same channel works the other way for data leaving a network |
-
-The detector looks at the network traffic itself, which maps to the ATT&CK data
-source Network Traffic Content and Network Traffic Flow.
+| [Protocol Tunneling](https://attack.mitre.org/techniques/T1572/) | T1572 | A file transfer carried inside ICMP echo |
+| [Non-Application Layer Protocol](https://attack.mitre.org/techniques/T1095/) | T1095 | Data moves over ICMP, with no HTTP or DNS |
+| [Ingress Tool Transfer](https://attack.mitre.org/techniques/T1105/) | T1105 | The client pulls a file into the host |
+| [Exfiltration Over Alternative Protocol](https://attack.mitre.org/techniques/T1048/) | T1048 | The same channel works for data leaving a network |
 
 ## Honest limits
 
