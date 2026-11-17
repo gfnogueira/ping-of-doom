@@ -9,15 +9,19 @@
 
 ![demo](docs/demo.gif)
 
-A server answers `ping`-style packets with a slice of the game. A client glues the
-slices back together, checks the hash, and you boot Doom from a file that arrived
-over ping. Then a detector reads the capture and calls out the tunnel.
+Ping is supposed to answer "are you there?". Here it answers "yes, and here is
+the next 1400 bytes of E1M1".
 
 The tunnel is the fun part. The detector is the part worth reusing.
 
-## Try it
+| | |
+| --- | --- |
+| **What you get** | A Doom tunnel over ping, a detector for it, Suricata rules, a one command lab |
+| **Needs** | Docker and Python 3.10+. macOS or Linux |
+| **Install** | Nothing. Python standard library only |
+| **Transfer time** | About one second |
 
-You need Docker and Python 3.10+. Works on macOS and Linux.
+## Quick start
 
 ```sh
 git clone https://github.com/gfnogueira/ping-of-doom
@@ -25,23 +29,36 @@ cd ping-of-doom
 ./demo.sh
 ```
 
-It downloads the shareware WAD, runs the server, a sniffer and the client in
+It downloads the shareware WAD, runs a server, a sniffer and a client in
 containers, pulls the game over ICMP, runs the detector and opens Doom if
-`chocolate-doom` is installed. The transfer takes about a second. No `pip install`,
-no scapy, just the Python standard library.
+`chocolate-doom` is installed.
 
 ## How it works
 
-```
-client asks:     "give me chunk 5"       echo request, 8 byte payload
-server answers:  "chunk 5 is: ...."      echo reply, up to 1400 byte payload
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    C->>S: echo request (manifest)
+    S-->>C: echo reply (name, size, sha256)
+    loop 1250 chunks, 32 in flight
+        C->>S: echo request (chunk N, 8 bytes)
+        S-->>C: echo reply (chunk N, up to 1400 bytes)
+    end
+    Note over C: verify sha256, write doom1.wad
 ```
 
-The server gzips the WAD into 1250 chunks. A manifest chunk carries the name, size
-and sha256. The client keeps 32 requests in flight, resends what times out and
-checks the hash before writing the file. ICMP payloads can carry any bytes, which is
-why tools like ptunnel exist. Nothing here is new. The point is to see it end to end
-and learn what it looks like on the wire.
+| Detail | Value |
+| --- | --- |
+| Compression | gzip, level 9 |
+| Chunk size | 1400 bytes |
+| Chunks | 1250 for `doom1.wad` |
+| Request payload | 8 bytes: marker + chunk index |
+| Reply payload | marker + index + up to 1400 bytes of data |
+| Reliability | window of 32, resend on timeout, sha256 at the end |
+
+ICMP payloads can carry any bytes, which is why tools like ptunnel exist. Nothing
+here is new. The point is to see it end to end and learn what it looks like on the wire.
 
 <details>
 <summary>Run it step by step, and why it uses containers</summary>
@@ -69,18 +86,36 @@ Same detector, two captures:
 | `ping -c 5 1.1.1.1` and `ping -s 1000 -c 3 1.1.1.1` from a laptop | 16 | ok |
 | Doom over ICMP | 2502 | suspicious |
 
-| Check | What it means |
+### What it checks
+
+| Check | Catches | Weight |
+| --- | --- | --- |
+| `reply_mismatch` | Reply is not a copy of the request. A real ping always echoes the payload, a tunnel has to put new data in there | Strong |
+| `high_entropy` | Payloads that look compressed or encrypted | Medium |
+| `high_rate` | Too many echo requests per second to one host | Medium |
+| `big_payload` | Echo payloads larger than a normal ping | Weak, a lead only |
+
+| Verdict | When |
 | --- | --- |
-| `reply_mismatch` | The reply is not a copy of the request. A real ping always echoes the payload back, a tunnel has to put new data in there |
-| `high_entropy` | Payloads that look compressed or encrypted |
-| `big_payload` | Echo payloads larger than a normal ping (default 100 bytes) |
-| `high_rate` | Too many echo requests per second to one host |
+| `ok` | Nothing fired |
+| `notice` | One check fired, and it was not `reply_mismatch` |
+| `suspicious` | `reply_mismatch`, or two or more checks |
 
-`reply_mismatch` is the strongest signal. The detector ignores this project's
-`POD1` marker on purpose, because anyone can change a marker in a minute.
+The detector ignores this project's `POD1` marker on purpose. Anyone can change a
+marker in a minute.
 
-It reads pcap and pcapng, exits with code 1 when something is suspicious, and has
-`--json` for scripts and `--help` for the thresholds.
+### Options
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--max-payload` | 100 | Largest normal echo payload, in bytes |
+| `--max-rate` | 100 | Echo requests per second before flagging |
+| `--min-entropy` | 7.0 | Bits per byte that count as high |
+| `--min-hits` | 10 | Packets needed before size, entropy or mismatch fires |
+| `--json` | off | Machine readable output |
+
+It reads pcap and pcapng, and exits with code 1 when something is suspicious, so
+it fits in a script or a CI job.
 
 <details>
 <summary>Run it on your own traffic</summary>
@@ -111,20 +146,19 @@ so those two checks only exist in the Python detector.
 
 ## Honest limits
 
-* **Size alone gives false positives.** `ping -s 1400` trips the size checks, and the
-  Suricata size rules alert on it too. The detector reports a size-only hit as a
-  `notice`, not as suspicious.
-* **This tunnel is not hidden.** No obfuscation, no timing tricks. A tunnel that
-  tries to blend in will be harder to catch, and the detector was not tested
-  against one.
-* **Lab scale.** The tunnel runs between containers. The detector also ran on real
-  ping traffic from a laptop, but not on a busy production network.
-* IPv4 and ICMP echo only. Unit tests: `python3 -m unittest discover`.
+| Limit | What it means |
+| --- | --- |
+| Size gives false positives | `ping -s 1400` trips the size checks, and the Suricata size rules alert on it too. The detector reports size alone as `notice` |
+| Not hidden | No obfuscation, no timing tricks. A tunnel that tries to blend in will be harder to catch, and the detector was not tested against one |
+| Lab scale | Tunnel tested between containers. Detector also ran on real laptop pings, not on a busy production network |
+| Scope | IPv4 and ICMP echo only |
+
+Run the tests with `python3 -m unittest discover`.
 
 ## Use it on your own machines only
 
-Run this in a lab or on machines you own. Moving data through ICMP on a network you
-do not have permission to test can break policy, and in some places the law.
+> Run this in a lab or on machines you own. Moving data through ICMP on a network
+> you do not have permission to test can break policy, and in some places the law.
 
 ## Credits and license
 
